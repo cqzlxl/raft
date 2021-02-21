@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -e
+
+if [[ $# -gt 0 ]]; then
+    modules="$@"
+else
+    modules='raft tests'
+fi
+
+autoflake -ir --remove-all-unused-imports --remove-unused-variables --remove-duplicate-keys --ignore-init-module-imports $modules
+isort --multi-line=3 --trailing-comma --force-grid-wrap=0 --combine-as --line-width 120 $modules
+black -t py37 --line-length 120 $modules
+vulture --min-confidence 95 $modules

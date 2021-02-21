@@ -1,0 +1,9 @@
+-r ./common.txt
+
+autoflake
+black
+isort
+locust
+pipdeptree
+pylint
+vulture
