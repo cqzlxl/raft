@@ -1,7 +1,7 @@
 import logging
 
 
-class LoggerAdapter(logging.LoggerAdapter):
+class Adapter(logging.LoggerAdapter):
     def __init__(self, logger, server):
         super().__init__(logger, dict())
         self.server = server

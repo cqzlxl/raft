@@ -4,7 +4,7 @@ from asyncio import CancelledError
 from contextlib import asynccontextmanager
 
 from .cm import CM
-from .logger import LoggerAdapter
+from .logger import Adapter
 from .rpc import AppendEntriesRequest, MessageType, VoteRequest, recv_message, send_message
 from .timer import ElectionTimer, HeartbeatTimer
 
@@ -32,7 +32,7 @@ class Server:
         self.rpc_host = rpc_host
         self.rpc_port = rpc_port
         self.rpc_server = None
-        self.logs = LoggerAdapter(logger, self)
+        self.logs = Adapter(logger, self)
 
     def ask_peers_votes(self, term):
         for peer in self.peers:
