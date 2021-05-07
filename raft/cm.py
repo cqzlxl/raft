@@ -2,19 +2,32 @@ import asyncio
 from enum import Enum
 from functools import wraps
 
-from .rpc import AppendEntriesRequest, AppendEntriesResponse, VoteRequest, VoteResponse
 
-
-class State(Enum):
+class Roles(Enum):
     leader = "leader"
     follower = "follower"
     candidate = "candidate"
 
 
+class State:
+    def __init__(self):
+        self.current_term = 0
+        self.voted_for = None
+        self.log = list()
+
+        self.commit_index = -1
+        self.last_applied = -1
+
+        self.next_index = dict()
+        self.match_index = dict()
+
+        self.votes_rcv = set()
+
+
 def synchronized(func):
     @wraps(func)
     async def wrapper(self, *args, **kwargs):
-        async with self.lock:
+        async with self.state_lock:
             return await func(self, *args, **kwargs)
 
     return wrapper
@@ -22,130 +35,128 @@ def synchronized(func):
 
 class CM:
     def __init__(self, server):
-        self.state = State.follower
-        self.current_term = 0
-        self.voted_for = None
-        self.votes_rcv = 0
-        self.lock = asyncio.Lock()
         self.server = server
-
-    @property
-    def logs(self):
-        return self.server.logs
-
-    @property
-    def majority(self):
-        return (len(self.server.peers) + 1) // 2 + 1
-
-    async def start_election(self):
-        self.as_candidate()
-        self.accumulate_votes()
-        self.server.ask_peers_votes(self.current_term)
-
-    async def heart_beat(self):
-        self.server.ask_peers_heartbeats(self.current_term)
+        self.server_id = server.id
+        self.logger = server.logger
+        self.role = Roles.follower
+        self.state = State()
+        self.state_lock = asyncio.Lock()
 
     @synchronized
-    async def input_vote_request(self, message: VoteRequest):
-        t, c = message.term, message.candidate_id
-        self.logs.debug("peer %s request vote for term %d", c, t)
-        if t > self.current_term:
-            self.as_follower(t)
-        if t == self.current_term and self.voted_for in (None, c):
+    async def input_vote_request(self, candidate_term, candidate_id):
+        self.logger.debug("peer %s term %d request vote", candidate_id, candidate_term)
+        if candidate_term > self.state.current_term:
+            self.as_follower(candidate_term)
+        if candidate_term == self.state.current_term and self.state.voted_for in (None, candidate_id):
+            self.state.voted_for = candidate_id
             self.reset_election_timer()
-            self.voted_for = c
             granted = True
         else:
             granted = False
-        self.logs.debug("granted? %s", granted)
-        return VoteResponse(term=self.current_term, granted=granted)
+        self.logger.debug("granted? %s", granted)
+        return self.state.current_term, granted
 
     @synchronized
-    async def input_vote_response(self, term, peer, message: VoteResponse):
-        t, g = message.term, message.granted
-        self.logs.debug("peer %s granted term %d? %s", peer, t, g)
+    async def input_vote_response(self, term, peer, vote_term, vote_granted):
+        self.logger.debug("peer %s term %d vote granted? %s", peer, vote_term, vote_granted)
         if not self.is_candidate():
-            self.logs.debug("not candidate now, ignore vote")
-        elif t < term:
-            self.logs.debug("out of date, ignore vote")
-        elif t == term:
-            if g:
-                self.accumulate_votes()
+            self.logger.debug("not candidate now, ignore vote")
+        elif vote_term < term:
+            self.logger.debug("out of date, ignore vote")
+        elif vote_term == term:
+            if vote_granted:
+                self.accumulate_vote(peer)
             else:
                 pass
         else:
-            self.as_follower(t)
+            self.as_follower(vote_term)
 
     @synchronized
-    async def input_heartbeat_request(self, message: AppendEntriesRequest):
-        t, s = message.term, message.leader_id
-        self.logs.debug("peer %s term %d request heartbeat", s, t)
-        if t < self.current_term:
+    async def input_append_entries_request(self, leader_term, leader_id):
+        self.logger.debug("peer %s term %d request heartbeat", leader_id, leader_term)
+        if leader_term < self.state.current_term:
             success = False
-        elif t == self.current_term:
+        elif leader_term == self.state.current_term:
             success = True
             if not self.is_follower():
-                self.as_follower(t)
+                self.as_follower(leader_term)
             else:
                 self.reset_election_timer()
         else:
             success = True
-            self.as_follower(t)
-        return AppendEntriesResponse(term=self.current_term, success=success)
+            self.as_follower(leader_term)
+        return self.state.current_term, success
 
     @synchronized
-    async def input_heartbeat_response(self, term, peer, message: AppendEntriesResponse):
-        t, s = message.term, message.success
-        self.logs.debug("peer %s term %d heartbeat OK? %s", peer, t, s)
-        if t > self.current_term:
-            self.as_follower(t)
+    async def input_append_entries_response(self, term, peer, append_term, append_success):
+        self.logger.debug("peer %s term %d heartbeat OK? %s", peer, append_term, append_success)
+        if append_term > self.state.current_term:
+            self.as_follower(append_term)
 
     @synchronized
     async def input_election_timeout(self):
         if not self.is_leader():
-            await self.start_election()
+            self.start_election()
 
     @synchronized
     async def input_heartbeat_timeout(self):
         if self.is_leader():
-            await self.heart_beat()
+            self.ask_peers_heartbeats()
 
-    def accumulate_votes(self):
-        self.votes_rcv += 1
-        if self.votes_rcv >= self.majority:
+    def start_election(self):
+        self.as_candidate()
+        self.accumulate_vote(self.server_id)
+        self.ask_peers_votes()
+
+    def accumulate_vote(self, server_id):
+        self.state.votes_rcv.add(server_id)
+        if len(self.state.votes_rcv) >= self.majority:
             self.as_leader()
 
     def as_leader(self):
         # current_term no change
-        self.voted_for = None
-        self.transition(State.leader)
+        self.state.voted_for = None
+        self.transition(Roles.leader)
 
     def as_follower(self, term):
-        self.current_term = term
-        self.voted_for = None
-        self.transition(State.follower)
+        self.state.current_term = term
+        self.state.voted_for = None
+        self.transition(Roles.follower)
         self.reset_election_timer()
 
     def as_candidate(self):
-        self.current_term += 1
-        self.voted_for = self.server.id
-        self.votes_rcv = 0  # accumulate later
-        self.transition(State.candidate)
+        self.state.current_term += 1
+        self.state.voted_for = self.server_id
+        self.state.votes_rcv = set()  # accumulate later
+        self.transition(Roles.candidate)
         self.reset_election_timer()
 
     def transition(self, new):
-        old = self.state
-        self.state = new
-        self.logs.info("state change from %s to %s", old, new)
+        old = self.role
+        self.role = new
+        self.logger.info("role changed from %s to %s", old.name, new.name)
 
     def is_leader(self):
-        return self.state == State.leader
+        return self.role == Roles.leader
 
     def is_follower(self):
-        return self.state == State.follower
+        return self.role == Roles.follower
 
     def is_candidate(self):
-        return self.state == State.candidate
+        return self.role == Roles.candidate
 
     def reset_election_timer(self):
         self.server.election_timer.reset()
+
+    def reset_heartbeat_timer(self):
+        self.server.heartbeat_timer.reset()
+
+    def ask_peers_heartbeats(self):
+        return self.server.ask_peers_heartbeats(self.state.current_term)
+
+    def ask_peers_votes(self):
+        return self.server.ask_peers_votes(self.state.current_term)
+
+    @property
+    def majority(self):
+        return (len(self.server.peers) + 1) // 2 + 1
