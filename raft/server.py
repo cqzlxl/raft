@@ -32,29 +32,45 @@ class Server(rpc.Server):
         self.heartbeat_timer = HeartbeatTimer(heartbeat_interval, self.cm.input_heartbeat_timeout)
         self.election_timer = ElectionTimer(election_timeout_min, election_timeout_max, self.cm.input_election_timeout)
 
-    async def handle_vote_request(self, term, candidate_id):
-        return await self.cm.input_vote_request(term, candidate_id)
+    async def handle_vote_request(self, params):
+        return await self.cm.input_vote_request(
+            params.term,
+            params.candidate_id,
+            params.last_log_index,
+            params.last_log_term,
+        )
 
-    async def handle_append_entries_request(self, term, leader_id):
-        return await self.cm.input_append_entries_request(term, leader_id)
+    async def handle_append_entries_request(self, params):
+        return await self.cm.input_append_entries_request(
+            params.term,
+            params.leader_id,
+            params.leader_commit,
+            params.prev_log_index,
+            params.prev_log_term,
+            params.entries,
+        )
 
-    def ask_peers_votes(self, term):
+    def ask_peers_votes(self, term, last_index, last_term):
         for peer in self.peers:
-            asyncio.create_task(self.ask_peer_with_timeout(self.ask_peer_vote(peer, term)))
+            self.ask_peer(self.ask_peer_vote(peer, term, last_index, last_term))
 
-    async def ask_peer_vote(self, peer_id, term):
+    async def ask_peer_vote(self, peer_id, term, last_index, last_term):
         client = self.rpc_clients[peer_id]
-        response = await client.ask_peer_vote(term, self.id)
-        await self.cm.input_vote_response(term, peer_id, response.term, response.vote_granted)
+        response = await client.ask_peer_vote(term, self.id, last_index, last_term)
+        await self.cm.input_vote_response(response.term, response.vote_granted, term, peer_id)
 
-    def ask_peers_heartbeats(self, term):
+    def ask_peers_append_entries(self, term, commit_index, previous, entries):
         for peer in self.peers:
-            asyncio.create_task(self.ask_peer_with_timeout(self.ask_peer_heartbeat(peer, term)))
+            self.ask_peer(self.ask_peer_append_entries(peer, term, commit_index, previous, entries))
 
-    async def ask_peer_heartbeat(self, peer_id, term):
+    async def ask_peer_append_entries(self, peer_id, term, commit_index, previous, entries):
+        prev_index, prev_term = previous[peer_id]
         client = self.rpc_clients[peer_id]
-        response = await client.ask_peer_heartbeat(term, self.id)
-        await self.cm.input_append_entries_response(term, peer_id, response.term, response.success)
+        response = await client.ask_peer_append_entries(term, self.id, commit_index, prev_index, prev_term, entries)
+        await self.cm.input_append_entries_response(response.term, response.success, term, peer_id)
+
+    def ask_peer(self, action):
+        asyncio.create_task(self.ask_peer_with_timeout(action))
 
     async def ask_peer_with_timeout(self, future):
         try:

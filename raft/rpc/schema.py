@@ -1,15 +1,16 @@
 from enum import IntEnum
+from typing import Any, List
 
-from pydantic import BaseModel, NonNegativeInt
+from pydantic import BaseModel, NonNegativeInt, conint
 
 
 class AppendEntriesRequest(BaseModel):
     term: NonNegativeInt
     leader_id: NonNegativeInt
-    # leader_commit: NonNegativeInt
-    # prev_log_index: conint(ge=-1)
-    # prev_log_term: conint(ge=-1)
-    # entries: List[Any] = list()
+    leader_commit: conint(ge=-1)
+    prev_log_index: conint(ge=-1)
+    prev_log_term: conint(ge=-1)
+    entries: List[Any] = list()
 
 
 class AppendEntriesResponse(BaseModel):
@@ -20,8 +21,8 @@ class AppendEntriesResponse(BaseModel):
 class VoteRequest(BaseModel):
     term: NonNegativeInt
     candidate_id: NonNegativeInt
-    # last_log_index: conint(ge=-1)
-    # last_log_term: conint(ge=-1)
+    last_log_index: conint(ge=-1)
+    last_log_term: conint(ge=-1)
 
 
 class VoteResponse(BaseModel):

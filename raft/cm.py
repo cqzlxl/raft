@@ -1,12 +1,18 @@
 import asyncio
+import functools
 from enum import Enum
-from functools import wraps
 
 
 class Roles(Enum):
     leader = "leader"
     follower = "follower"
     candidate = "candidate"
+
+
+class Log:
+    def __init__(self, term, command):
+        self.term = term
+        self.command = command
 
 
 class State:
@@ -25,10 +31,20 @@ class State:
 
 
 def synchronized(func):
-    @wraps(func)
+    @functools.wraps(func)
     async def wrapper(self, *args, **kwargs):
         async with self.state_lock:
             return await func(self, *args, **kwargs)
+
+    return wrapper
+
+
+def try_follow_higher_term(func):
+    @functools.wraps(func)
+    async def wrapper(self, peer_term, *args, **kwargs):
+        if self.state.current_term < peer_term:
+            self.as_follower(peer_term)
+        return await func(self, peer_term, *args, **kwargs)
 
     return wrapper
 
@@ -37,17 +53,21 @@ class CM:
     def __init__(self, server):
         self.server = server
         self.server_id = server.id
+        self.peers = server.peers.keys()
         self.logger = server.logger
         self.role = Roles.follower
         self.state = State()
         self.state_lock = asyncio.Lock()
 
     @synchronized
-    async def input_vote_request(self, candidate_term, candidate_id):
+    @try_follow_higher_term
+    async def input_vote_request(self, candidate_term, candidate_id, candidate_last_index, candidate_last_term):
         self.logger.debug("peer %s term %d request vote", candidate_id, candidate_term)
-        if candidate_term > self.state.current_term:
-            self.as_follower(candidate_term)
-        if candidate_term == self.state.current_term and self.state.voted_for in (None, candidate_id):
+        if (
+            candidate_term == self.state.current_term
+            and self.state.voted_for in (None, candidate_id)
+            and not self.log_newer_than(candidate_last_index, candidate_last_term)
+        ):
             self.state.voted_for = candidate_id
             self.reset_election_timer()
             granted = True
@@ -57,7 +77,8 @@ class CM:
         return self.state.current_term, granted
 
     @synchronized
-    async def input_vote_response(self, term, peer, vote_term, vote_granted):
+    @try_follow_higher_term
+    async def input_vote_response(self, vote_term, vote_granted, term, peer):
         self.logger.debug("peer %s term %d vote granted? %s", peer, vote_term, vote_granted)
         if not self.is_candidate():
             self.logger.debug("not candidate now, ignore vote")
@@ -66,32 +87,31 @@ class CM:
         elif vote_term == term:
             if vote_granted:
                 self.accumulate_vote(peer)
-            else:
-                pass
-        else:
-            self.as_follower(vote_term)
 
     @synchronized
-    async def input_append_entries_request(self, leader_term, leader_id):
-        self.logger.debug("peer %s term %d request heartbeat", leader_id, leader_term)
-        if leader_term < self.state.current_term:
-            success = False
-        elif leader_term == self.state.current_term:
-            success = True
-            if not self.is_follower():
-                self.as_follower(leader_term)
+    @try_follow_higher_term
+    async def input_append_entries_request(self, leader_term, leader_id, commit_index, prev_index, prev_term, entries):
+        self.logger.debug("peer %s term %d request append entries", leader_id, leader_term)
+        if -1 < prev_index < len(self.state.log) and self.log_term(prev_index) == prev_term:
+            if entries:
+                raise NotImplementedError()
             else:
-                self.reset_election_timer()
+                self.logger.debug("heartbeat request in fact")
+                if leader_term < self.state.current_term:
+                    success = False
+                else:
+                    success = True
+                    if not self.is_follower():
+                        self.as_follower(leader_term)
         else:
-            success = True
-            self.as_follower(leader_term)
+            success = False
+
         return self.state.current_term, success
 
     @synchronized
-    async def input_append_entries_response(self, term, peer, append_term, append_success):
-        self.logger.debug("peer %s term %d heartbeat OK? %s", peer, append_term, append_success)
-        if append_term > self.state.current_term:
-            self.as_follower(append_term)
+    @try_follow_higher_term
+    async def input_append_entries_response(self, append_term, append_success, term, peer):
+        self.logger.debug("peer %s term %d append entries for term %d OK? %s", peer, append_term, term, append_success)
 
     @synchronized
     async def input_election_timeout(self):
@@ -117,6 +137,8 @@ class CM:
         # current_term no change
         self.state.voted_for = None
         self.transition(Roles.leader)
+        self.init_peers_indexes()
+        self.ask_peers_heartbeats()
 
     def as_follower(self, term):
         self.state.current_term = term
@@ -145,6 +167,37 @@ class CM:
     def is_candidate(self):
         return self.role == Roles.candidate
 
+    def log_newer_than(self, index, term):
+        last_index, last_term = self.last_log()
+        if last_term < term:
+            return False
+        elif last_term == term:
+            return last_index > index
+        else:
+            return True
+
+    def last_log(self):
+        last_index = len(self.state.log) - 1
+        last_term = self.log_term(last_index)
+        return last_index, last_term
+
+    def peers_previous_indexes(self):
+        indexes = dict()
+        for id_, index in self.state.next_index.items():
+            prev_index = index - 1
+            prev_term = self.log_term(prev_index)
+            indexes[id_] = (prev_index, prev_term)
+        return indexes
+
+    def init_peers_indexes(self):
+        next_index = len(self.state.log)
+        for id_ in self.server.peers:
+            self.state.match_index[id_] = -1
+            self.state.next_index[id_] = next_index
+
+    def log_term(self, index):
+        return -1 if index < 0 else self.state.log[index].term
+
     def reset_election_timer(self):
         self.server.election_timer.reset()
 
@@ -152,10 +205,12 @@ class CM:
         self.server.heartbeat_timer.reset()
 
     def ask_peers_heartbeats(self):
-        return self.server.ask_peers_heartbeats(self.state.current_term)
+        previous = self.peers_previous_indexes()
+        return self.server.ask_peers_append_entries(self.state.current_term, self.state.commit_index, previous, list())
 
     def ask_peers_votes(self):
-        return self.server.ask_peers_votes(self.state.current_term)
+        last_index, last_term = self.last_log()
+        return self.server.ask_peers_votes(self.state.current_term, last_index, last_term)
 
     @property
     def majority(self):

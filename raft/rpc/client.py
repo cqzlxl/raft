@@ -15,16 +15,28 @@ class Client:
         self.server_port = server_port
         self.server_id = server_id
 
-    async def ask_peer_vote(self, term, candidate_id):
+    async def ask_peer_vote(self, term, candidate_id, last_log_index, last_log_term):
         async with self.connect() as transport:
-            request = VoteRequest(term=term, candidate_id=candidate_id)
+            request = VoteRequest(
+                term=term,
+                candidate_id=candidate_id,
+                last_log_index=last_log_index,
+                last_log_term=last_log_term,
+            )
             await transport.write(request)
             response = await transport.read()
             return response
 
-    async def ask_peer_heartbeat(self, term, leader_id):
+    async def ask_peer_append_entries(self, term, leader_id, commit_index, prev_index, prev_term, entries):
         async with self.connect() as transport:
-            request = AppendEntriesRequest(term=term, leader_id=leader_id)
+            request = AppendEntriesRequest(
+                term=term,
+                leader_id=leader_id,
+                leader_commit=commit_index,
+                prev_log_index=prev_index,
+                prev_log_term=prev_term,
+                entries=entries,
+            )
             await transport.write(request)
             response = await transport.read()
             return response

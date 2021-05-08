@@ -29,17 +29,17 @@ class Server:
         with Transport(reader, writer) as transport:
             message = await transport.read()
             if isinstance(message, VoteRequest):
-                term, vote_granted = await self.handle_vote_request(message.term, message.candidate_id)
+                term, vote_granted = await self.handle_vote_request(message)
                 response = VoteResponse(term=term, vote_granted=vote_granted)
             elif isinstance(message, AppendEntriesRequest):
-                term, success = await self.handle_append_entries_request(message.term, message.leader_id)
+                term, success = await self.handle_append_entries_request(message)
                 response = AppendEntriesResponse(term=term, success=success)
             else:
                 raise Exception("can not handle this type", type)
             await transport.write(response)
 
-    async def handle_vote_request(self, term, candidate_id):
+    async def handle_vote_request(self, message):
         raise NotImplementedError()
 
-    async def handle_append_entries_request(self, term, leader_id):
+    async def handle_append_entries_request(self, message):
         raise NotImplementedError()

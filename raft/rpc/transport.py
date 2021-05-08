@@ -22,7 +22,7 @@ class Transport(contextlib.ContextDecorator):
 
     def __exit__(self, _, exc_value, __):
         if exc_value is not None:
-            logs.error(exc_info=exc_value)
+            logs.error("transfer message", exc_info=exc_value)
         self.writer.close()
 
     async def read(self):
